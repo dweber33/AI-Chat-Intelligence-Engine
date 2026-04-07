@@ -1,0 +1,141 @@
+import json
+import os
+import boto3
+import logging
+
+# Set up logging for production visibility
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Initialize the Bedrock client outside the handler for execution environment reuse
+# Note: Ensure the Lambda Execution Role has 'bedrock:InvokeModel' permissions
+bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
+
+def lambda_handler(event, context):
+    """
+    AWS Lambda function that processes IT operational chat logs using Amazon Bedrock.
+    Generates a high-level executive summary, identifies failed changes, and
+    performs a GAP analysis using Anthropic Claude.
+    
+    Expected Header: x-api-key (Validated against AUTH_TOKEN env var)
+    Expected Body: { "chat_logs": "string", "lookback_hours": "int" }
+    """
+
+    # 1. Security Check: Validate Request Token
+    # Store your secret in Lambda Environment Variables
+    expected_secret = os.environ.get('AUTH_TOKEN')
+    headers = event.get('headers', {})
+    provided_secret = headers.get('x-api-key')
+
+    if not provided_secret or provided_secret != expected_secret:
+        logger.warning("Unauthorized access attempt detected.")
+        return {
+            'statusCode': 403, 
+            'body': json.dumps('Forbidden: Invalid or missing security token')
+        }
+
+    # 2. Extract & Validate Payload
+    try:
+        body = json.loads(event.get('body', '{}'))
+        chat_logs = body.get('chat_logs', '')
+        lookback_hours = body.get('lookback_hours', '12')
+
+        if not chat_logs:
+            return {
+                'statusCode': 400, 
+                'body': json.dumps('Bad Request: No log data provided')
+            }
+            
+        # Truncate logs to prevent exceeding LLM context window limits (~300k chars)
+        if len(chat_logs) > 300000:
+            chat_logs = chat_logs[-300000:] 
+
+    except Exception as e:
+        logger.error(f"Payload parsing error: {str(e)}")
+        return {
+            'statusCode': 400, 
+            'body': json.dumps(f'Invalid JSON payload: {str(e)}')
+        }
+
+    # 3. System Prompt (Operational Intelligence Rules)
+    # This defines the persona and the specific logic for the AI summary
+    system_prompt = f"""You are a Senior Executive Incident Manager. Your job is to filter noise, use deep operational intelligence, and present a highly polished executive summary. 
+
+### CONTEXT:
+**Reporting Window:** Last {lookback_hours} Hours.
+
+### EXCLUSION RULES (IGNORE):
+1. **NOISE:** Ignore 'Circuit Flaps' and 'Interface Bounces'.
+2. **SUCCESSFUL CHANGES:** NEVER list a successful change. Only focus on failures or outages.
+3. **REQUESTS:** Ignore standard service requests or low-level tasks.
+4. **SILENCE:** Ignore non-operational banter.
+
+### INCLUSION RULES (PRIORITIZE):
+1. **CHANNELS:** Focus on Network-Ops, Server-Admins, and Security-Ops discussions.
+2. **TRIGGERS:** Keywords: 'Bridge', 'Down', 'Impact', 'Critical', 'Rollback', 'Failed', 'MIM', 'P2'.
+
+### OUTPUT FORMAT (Markdown):
+
+# Executive Impact Summary
+(Elevate high-priority threats here. Act like a senior manager; do not bury critical infrastructure risks.)
+
+## [INC# or Descriptive Title]
+* **Impact:** [Who/What is down? Business risk?]
+* **Status:** [Active/Mitigated/Resolved]
+* **Bridge:** [Link or 'N/A']
+* **Manager Note:** [Explicit directive or next step]
+
+# High-Risk & Failed Change Activity
+(STRICT: ONLY list changes that FAILED or caused an OUTAGE.)
+
+# Watchlist / Emerging Conversations
+(Summarize lower-priority operational discussions or minor alarms.)
+
+# Lessons Learned
+(Capture shared knowledge discovered regarding Environment or Process.)
+
+# GAP Analysis
+(Analyze for systemic risks: vendor misalignments, lack of redundancy, or monitoring blind spots.)"""
+
+    # 4. Prepare Bedrock Messages
+    messages = [
+        {
+            "role": "user",
+            "content": [{"text": f"LOGS FOR ANALYSIS:\n{chat_logs}"}]
+        }
+    ]
+
+    try:
+        # Use a Regional Inference Profile ID for better performance/throughput
+        # If this fails, use the base model ID: 'anthropic.claude-3-sonnet-20240229-v1:0'
+        model_id = 'us.anthropic.claude-3-5-sonnet-20240620-v1:0'
+
+        # 5. Invoke Bedrock Converse API
+        response = bedrock.converse(
+            modelId=model_id,
+            messages=messages,
+            system=[{"text": system_prompt}],
+            inferenceConfig={
+                "maxTokens": 4096,
+                "temperature": 0.1 # Low temperature for consistent, analytical output
+            }
+        )
+
+        # Extract the text content from the standardized Converse API response
+        summary_text = response['output']['message']['content'][0]['text']
+
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*' # Change this for production
+            },
+            'body': json.dumps({'summary': summary_text})
+        }
+
+    except Exception as e:
+        logger.error(f"Bedrock invocation failed: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps("Internal Server Error: AI processing failed.")
+        }
