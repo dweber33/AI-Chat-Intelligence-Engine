@@ -1,0 +1,152 @@
+{
+  "properties": {
+    // ==========================================
+    // 1. CONNECTION REFERENCES
+    // Defines the authenticated connections required to run this flow.
+    // These will prompt the user to authenticate upon importing the solution.
+    // ==========================================
+    "connectionReferences": {
+      "shared_teams": {
+        "runtimeSource": "embedded",
+        "connection": {
+          "connectionReferenceLogicalName": "mim_sharedteams_reference" // Sanitized
+        },
+        "api": {
+          "name": "shared_teams"
+        }
+      },
+      "shared_sharepointonline": {
+        "runtimeSource": "embedded",
+        "connection": {
+          "connectionReferenceLogicalName": "mim_sharedsharepointonline_reference" // Sanitized
+        },
+        "api": {
+          "name": "shared_sharepointonline"
+        }
+      }
+    },
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$authentication": {
+          "defaultValue": {},
+          "type": "SecureObject"
+        },
+        "$connections": {
+          "defaultValue": {},
+          "type": "Object"
+        }
+      },
+      // ==========================================
+      // 2. TRIGGERS
+      // The event that initiates the ingestion pipeline.
+      // ==========================================
+      "triggers": {
+        "When_a_new_message_is_added_to_a_channel": {
+          "type": "OpenApiConnectionWebhook",
+          "inputs": {
+            "parameters": {
+              "threadType": "channel",
+              // SANITIZED: Replace these array items with your target Teams Channel IDs
+              "requestBody/channels": [
+                "19:placeholder-channel-id-1@thread.tacv2",
+                "19:placeholder-channel-id-2@thread.tacv2"
+              ],
+              // SANITIZED: Replace with your target Teams Group ID
+              "requestBody/groupId": "00000000-0000-0000-0000-000000000000" 
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_teams",
+              "connectionName": "shared_teams",
+              "operationId": "WebhookNewMessageTrigger"
+            },
+            "authentication": "@parameters('$authentication')"
+          },
+          "description": "Listens for new operational updates in designated MIM channels."
+        }
+      },
+      // ==========================================
+      // 3. ACTIONS
+      // The sequential logic executed after the trigger fires.
+      // ==========================================
+      "actions": {
+        // ACTION A: Fetch the human-readable name of the channel
+        "Get_details_for_a_specific_channel_in_a_team": {
+          "runAfter": {
+            "Get_message_details": [
+              "Succeeded"
+            ]
+          },
+          "type": "OpenApiConnection",
+          "inputs": {
+            "parameters": {
+              "groupId": "@triggerOutputs()?['body/value']?[0]?['teamId']",
+              "channelId": "@triggerOutputs()?['body/value']?[0]?['channelId']"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_teams",
+              "connectionName": "shared_teams",
+              "operationId": "GetChannel"
+            },
+            "authentication": "@parameters('$authentication')"
+          }
+        },
+        // ACTION B: Load the enriched payload into the Database
+        "Create_item": {
+          "runAfter": {
+            "Get_details_for_a_specific_channel_in_a_team": [
+              "Succeeded"
+            ]
+          },
+          "type": "OpenApiConnection",
+          "inputs": {
+            "parameters": {
+              // SANITIZED: Target SharePoint Site URL
+              "dataset": "https://[YOUR-TENANT].sharepoint.com/sites/MIM-Shift-Logs",
+              // SANITIZED: Target SharePoint List GUID or Name
+              "table": "[YOUR-LIST-GUID-OR-NAME]",
+              
+              // PRIVACY BY DESIGN: Explicitly pulling 'department' instead of 'displayName' to prevent PII ingestion
+              "item/Title": "@outputs('Get_message_details')?['body/from/user/department']", 
+              
+              // CONCATENATION: Merges the message subject and body into a single string for the LLM
+              "item/MessageBody": "@{outputs('Get_message_details')?['body/subject']}\n@{outputs('Get_message_details')?['body/body/plainTextContent']}",
+              "item/OriginalTimestamp": "@outputs('Get_message_details')?['body/createdDateTime']",
+              "item/ChatID": "@outputs('Get_details_for_a_specific_channel_in_a_team')?['body/displayName']"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline",
+              "connectionName": "shared_sharepointonline",
+              "operationId": "PostItem"
+            },
+            "authentication": "@parameters('$authentication')"
+          }
+        },
+        // ACTION C: Fetch the deep metadata of the triggered chat message
+        "Get_message_details": {
+          "runAfter": {},
+          "type": "OpenApiConnection",
+          "inputs": {
+            "parameters": {
+              "messageId": "@triggerOutputs()?['body/value']?[0]?['messageId']",
+              "threadType": "channel",
+              "body/recipient/groupId": "@triggerOutputs()?['body/value']?[0]?['teamId']",
+              "body/recipient/channelId": "@triggerOutputs()?['body/value']?[0]?['channelId']",
+              "body/recipient/parentMessageId": "@triggerOutputs()?['body/value']?[0]?['replyToMessageId']"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_teams",
+              "connectionName": "shared_teams",
+              "operationId": "GetMessageDetails"
+            },
+            "authentication": "@parameters('$authentication')"
+          }
+        }
+      },
+      "outputs": {}
+    },
+    "templateName": null
+  },
+  "schemaVersion": "1.0.0.0"
+}
