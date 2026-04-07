@@ -32,29 +32,87 @@ A scheduled flow that runs on a configurable cadence. It queries the SharePoint 
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  SOURCE                                                      │
-│  Any Teams channels - one or many, any topic or team         │
-└───────────────────────────┬──────────────────────────────────┘
-                            │ webhook (real-time)
-┌───────────────────────────▼──────────────────────────────────┐
-│  INGEST                                                      │
-│  Collector flow(s) → SharePoint buffer                       │
-│  PII-free · department-only attribution                      │
-└───────────────────────────┬──────────────────────────────────┘
-                            │ scheduled query (configurable window)
-┌───────────────────────────▼──────────────────────────────────┐
-│  ANALYZE                                                     │
-│  Token-optimised payload → AWS Lambda → AWS Bedrock          │
-│  Claude Sonnet with Chain-of-Thought prompting               │
-└───────────────────────────┬──────────────────────────────────┘
-                            │ summary output
-┌───────────────────────────▼──────────────────────────────────┐
-│  DELIVER                                                     │
-│  Teams message → any channel, chat, or audience              │
-│  + cleanup: processed rows purged from buffer                │
-└──────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    %% Styling Definitions
+    classDef msTeams fill:#4B53BC,stroke:#ffffff,stroke-width:2px,color:#ffffff,rx:5px,ry:5px;
+    classDef powerAutomate fill:#0066FF,stroke:#ffffff,stroke-width:2px,color:#ffffff,rx:5px,ry:5px;
+    classDef sharePoint fill:#036C70,stroke:#ffffff,stroke-width:2px,color:#ffffff,rx:5px,ry:5px;
+    classDef aws fill:#FF9900,stroke:#ffffff,stroke-width:2px,color:#ffffff,rx:5px,ry:5px;
+    classDef awsBedrock fill:#005571,stroke:#ffffff,stroke-width:2px,color:#ffffff,rx:5px,ry:5px;
+    classDef logic fill:#F3F4F6,stroke:#4B5563,stroke-width:1px,color:#111827,rx:5px,ry:5px;
+
+    %% Phase 1: Real-Time Ingest
+    subgraph Phase1 [Phase 1: Collector Flow - Event Driven Ingestion]
+        direction TB
+        WHT[Teams Webhook Trigger<br/>When a new message is added]:::powerAutomate
+        GetMsg[Get Message Details<br/>Extract Subject & Body]:::logic
+        GetChan[Get Channel Details<br/>Resolve Human-Readable Name]:::logic
+        Sanitize[Privacy Filter<br/>Map 'Department' ONLY, Strip Names]:::logic
+        
+        WHT --> GetMsg --> GetChan --> Sanitize
+    end
+
+    %% Source Systems
+    T1(Monitored Teams Channel 1):::msTeams -.->|Real-time Push| WHT
+    T2(Monitored Teams Channel 2):::msTeams -.->|Real-time Push| WHT
+
+    %% Data Storage Buffer
+    subgraph Storage [Shared Transient Storage]
+        SPBuffer[(SharePoint Online List<br/>Log Buffer)]:::sharePoint
+    end
+    
+    Sanitize -->|Create Item<br/>Concatenate Subject+Body| SPBuffer
+
+    %% Phase 2: Scheduled Analysis
+    subgraph Phase2 [Phase 2: Main Flow - Scheduled Analysis & Delivery]
+        direction TB
+        Schedule((Recurrence Trigger<br/>e.g., 5 AM / 5 PM)):::powerAutomate
+        
+        Lookback{Evaluate Dynamic<br/>Lookback Window}:::logic
+        L12[Default:<br/>12 Hours]:::logic
+        L60[Monday 5AM:<br/>60 Hours]:::logic
+        L168[Friday 5PM:<br/>168 Hours]:::logic
+        
+        QuerySP[Get Items<br/>Query logs within timeframe]:::powerAutomate
+        Optimize[Select Array Mapping<br/>Token Optimization to Flat String]:::logic
+        
+        Schedule --> Lookback
+        Lookback -->|Standard Shift| L12
+        Lookback -->|Weekend Capture| L60
+        Lookback -->|Week-in-Review| L168
+        
+        L12 & L60 & L168 --> QuerySP
+        QuerySP --> Optimize
+    end
+
+    SPBuffer -.->|Read Logs| QuerySP
+
+    %% Phase 3: AI Intelligence Bridge
+    subgraph AIEngine [AWS Lambda Bridge & AI Analysis]
+        direction TB
+        Auth{Security Validation<br/>x-api-key == AUTH_TOKEN}:::logic
+        SanitizePayload[Payload Validation<br/>Truncate to 300k chars]:::aws
+        
+        Bedrock[AWS Bedrock: Claude Sonnet<br/>Apply System Prompt & CoT Heuristics]:::awsBedrock
+        
+        Auth -->|Pass| SanitizePayload
+        SanitizePayload -->|Invoke Model| Bedrock
+    end
+
+    Optimize -->|HTTP POST Request| Auth
+
+    %% Phase 4: Delivery & Cleanup
+    subgraph Delivery [Delivery & Maintenance]
+        direction TB
+        PostTeams[Post Message<br/>Deliver AI Summary to Target]:::msTeams
+        Cleanup[Apply to Each Cleanup<br/>Delete rows with Concurrency 50]:::powerAutomate
+        
+        PostTeams --> Cleanup
+    end
+
+    Bedrock -->|Return JSON Summary| PostTeams
+    Cleanup -->|Purge Processed Logs| SPBuffer
 ```
 
 ---
