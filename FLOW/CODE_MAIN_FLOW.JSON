@@ -1,0 +1,228 @@
+{
+  "properties": {
+    "connectionReferences": {
+      // ==========================================
+      // 1. CONNECTION REFERENCES
+      // Defines the authenticated connections required to run this flow.
+      // These will prompt the user to authenticate upon importing the solution.
+      // ==========================================
+      "shared_sharepointonline": {
+        "runtimeSource": "embedded",
+        "connection": {
+          "connectionReferenceLogicalName": "mim_sharepoint_reference"
+        },
+        "api": {
+          "name": "shared_sharepointonline"
+        }
+      },
+      "shared_teams-1": {
+        "runtimeSource": "embedded",
+        "connection": {
+          "connectionReferenceLogicalName": "mim_teams_reference"
+        },
+        "api": {
+          "name": "shared_teams"
+        }
+      }
+    },
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "triggers": {
+        "Recurrence": {
+          "description": "Triggered twice daily (5AM/5PM) to facilitate shift handovers and weekend/weekly recaps.",
+          "recurrence": {
+            "frequency": "Week",
+            "interval": 1,
+            "timeZone": "Eastern Standard Time",
+            "schedule": {
+              "weekDays": [
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+                "Sunday"
+              ],
+              "hours": [
+                "5",
+                "17"
+              ]
+            }
+          },
+          "type": "Recurrence"
+        }
+      },
+      "actions": {
+        // ==========================================
+        // 2. VARIABLE INITIALIZATION
+        // Sets the baseline temporal lookback for data collection.
+        // ==========================================
+        "Initialize_variable": {
+          "description": "Default lookback set to 12 hours for standard daily shift recaps.",
+          "type": "InitializeVariable",
+          "inputs": {
+            "variables": [
+              {
+                "name": "varLookbackHours",
+                "type": "integer",
+                "value": -12
+              }
+            ]
+          }
+        },
+        // ==========================================
+        // 3. TEMPORAL LOGIC GATES
+        // Dynamically adjusts lookback based on shift-change requirements.
+        // ==========================================
+        "Condition_Is_It_Monday_Morning": {
+          "description": "If Monday at 5AM, expand lookback to 60 hours to capture all weekend tribal knowledge and undocumented fixes.",
+          "type": "If",
+          "expression": {
+            "and": [
+              {
+                "equals": [
+                  "@dayOfWeek(utcNow())",
+                  1
+                ]
+              },
+              {
+                "equals": [
+                  "@formatDateTime(utcNow(), 'HH')",
+                  "05"
+                ]
+              }
+            ]
+          },
+          "actions": {
+            "Set_variable_Lookback_Weekend": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "varLookbackHours",
+                "value": -60
+              }
+            }
+          }
+        },
+        "Condition_Is_it_Friday_Evening": {
+          "description": "If Friday at 5PM, expand lookback to 168 hours for a full-week strategic gap analysis for leadership.",
+          "type": "If",
+          "expression": {
+            "and": [
+              {
+                "equals": [
+                  "@dayOfWeek(utcNow())",
+                  5
+                ]
+              },
+              {
+                "equals": [
+                  "@formatDateTime(utcNow(), 'HH')",
+                  "17"
+                ]
+              }
+            ]
+          },
+          "actions": {
+            "Set_variable_LookBack_Week": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "varLookbackHours",
+                "value": -168
+              }
+            }
+          }
+        },
+        // ==========================================
+        // 4. DATA EXTRACTION & AI ANALYSIS
+        // Optimized data mapping and Chain-of-Thought (CoT) reasoning.
+        // ==========================================
+        "Get_items": {
+          "description": "Fetches raw logs from the sanitized SharePoint ingestion list.",
+          "type": "OpenApiConnection",
+          "inputs": {
+            "parameters": {
+              "dataset": "https://tenant.sharepoint.com/sites/Incident-Intelligence",
+              "table": "sanitized_guid_input_table",
+              "$filter": "OriginalTimestamp ge '@{formatDateTime(addHours(utcNow(), variables('varLookbackHours')), 'yyyy-MM-ddTHH:mm:ssZ')}'"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline",
+              "operationId": "GetItems",
+              "connectionName": "shared_sharepointonline"
+            }
+          }
+        },
+        "Select_-_Chat_Logs": {
+          "description": "TOKEN OPTIMIZATION: Uses 'Text Mode' mapping to strip JSON keys, reducing token consumption for AWS Bedrock.",
+          "type": "Select",
+          "inputs": {
+            "from": "@outputs('Get_items')?['body/value']",
+            "select": "@concat('[', item()?['ChatID'], '] [', item()?['OriginalTimestamp'], '] ', item()?['Title'], ': ', item()?['MessageBody'])"
+          }
+        },
+        "HTTP_AWS_Bedrock": {
+          "description": "Posts optimized logs to AWS Bedrock via Lambda. Tuned for 'Tribal Knowledge' and 'Gap Analysis' extraction.",
+          "type": "Http",
+          "inputs": {
+            "uri": "https://sanitized-lambda-bridge-url.us-east-1.on.aws/",
+            "method": "POST",
+            "headers": {
+              "x-mim-secret": "PLACEHOLDER_SECRET_KEY"
+            },
+            "body": {
+              "chat_logs": "@{join(body('Select_-_Chat_Logs'), '\n')}"
+            }
+          },
+          "limit": {
+            "timeout": "PT5M"
+          }
+        },
+        // ==========================================
+        // 5. OUTPUTS & CLEANUP
+        // Distribution of intelligence and concurrency-optimized list maintenance.
+        // ==========================================
+        "Post_to_Teams": {
+          "description": "Delivers the shift intelligence summary to the specified engineering lead recipient.",
+          "type": "OpenApiConnection",
+          "inputs": {
+            "parameters": {
+              "poster": "Flow bot",
+              "location": "Chat with Flow bot",
+              "body/recipient": "lead_engineer@company.com",
+              "body/messageBody": "<p>@{body('HTTP_AWS_Bedrock')?['summary']}</p>"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_teams",
+              "operationId": "PostMessageToConversation",
+              "connectionName": "shared_teams-1"
+            }
+          }
+        },
+        "Apply_to_each_Cleanup": {
+          "description": "High-volume cleanup loop. Concurrency set to 50 to prevent SharePoint throttling while purging processed logs.",
+          "type": "Foreach",
+          "foreach": "@outputs('Get_items')?['body/value']",
+          "runtimeConfiguration": {
+            "concurrency": {
+              "repetitions": 50
+            }
+          },
+          "actions": {
+            "Delete_Chat_Logs": {
+              "type": "OpenApiConnection",
+              "inputs": {
+                "parameters": {
+                  "dataset": "https://tenant.sharepoint.com/sites/Incident-Intelligence",
+                  "table": "sanitized_guid_input_table",
+                  "id": "@items('Apply_to_each_Cleanup')?['ID']"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
